@@ -786,6 +786,188 @@ log_message("Run quick_setup_guide() to see setup instructions", "INFO")
 quick_setup_guide()
 
 # -----------------------------------------------------------------------------
+# 9. DEMO USAGE (RUNNABLE EXAMPLE)
+# -----------------------------------------------------------------------------
+# This demo provides a minimal, self-contained example of how to use the key
+# functions in this script without requiring external NetCDF files or the full
+# JASMIN/MOSRS environment. It uses synthetic data and lightweight placeholder
+# implementations for the required functions (dgp/validate/predict and
+# extract_one_jules) so that users can understand the workflow and run an
+# end-to-end example quickly.
+#
+# HOW TO RUN:
+#   1) Ensure this file is sourced in an interactive R session.
+#   2) Set DEMO_RUN <- TRUE below (default is TRUE). Then re-source or run the
+#      demo block. The demo creates a tiny synthetic training dataset, builds a
+#      placeholder emulator, and computes simple implausibility scores.
+#
+# WHAT IT SHOWS:
+#   - Defining a minimal parameter range object (para_red)
+#   - Creating a small synthetic training set across years
+#   - Implementing placeholder dgp/validate/predict functions to mimic an
+#     emulator API
+#   - Calling create_emulator() with synthetic data
+#   - Calling calculate_implausibility() with synthetic observations
+#   - Interpreting the resulting objects
+
+DEMO_RUN <- TRUE
+
+if (isTRUE(DEMO_RUN)) {
+  log_message("=== STARTING DEMO USAGE ===", "DEMO")
+
+  # ---------------------------------------------------------------------------
+  # STEP 1: Define minimal required objects and placeholder functions
+  # ---------------------------------------------------------------------------
+  # The workflow expects the following to exist: para_red (parameter ranges)
+  # and functions: set_seed, dgp, validate, predict.
+  # We define lightweight versions here for demonstration.
+
+  # Minimal parameter ranges (2 parameters shown as an example)
+  para_red <- data.frame(
+    mort_base_nt = c(0.02, 0.08),  # min, max
+    alpha_red_nt = c(0.2, 0.8)     # min, max
+  )
+  rownames(para_red) <- c('min', 'max')
+
+  # Deterministic seed utility used by the emulator builder
+  set_seed <- function(seed_value) {
+    set.seed(seed_value)
+  }
+
+  # Placeholder emulator constructor: accepts standardized API and stores X/Y
+  dgp <- function(X, Y, name = c("matern2.5", "sexp"), nugget = 1e-5, B = 5) {
+    list(
+      X = X,
+      Y = Y,
+      kernels = name,
+      nugget = nugget,
+      chains = B,
+      trained = TRUE
+    )
+  }
+
+  # Placeholder validate: returns the same object (no-op)
+  validate <- function(emulator) {
+    emulator
+  }
+
+  # Placeholder predict: returns simple statistics from inputs to mimic results
+  predict <- function(emulator, x, cores = NULL) {
+    # In a real emulator, this would compute predictive mean/variance.
+    # Here we create a basic deterministic mapping for demo purposes.
+    pred_mean <- rowMeans(as.matrix(x))
+    # Simple variance proxy (not statistically meaningful, for demo only)
+    pred_var <- apply(as.matrix(x), 1, stats::var)
+    list(results = list(mean = pred_mean, var = pred_var))
+  }
+
+  # (Optional) Placeholder NetCDF extractor if users explore process_jules_folder
+  extract_one_jules <- function(file_path) {
+    # Returns a 10-year monthly synthetic time series (120 months) with a field
+    # named temp3 to match process_jules_folder expectations.
+    data.frame(
+      file = basename(file_path),
+      temp3 = stats::rnorm(120)
+    )
+  }
+
+  # ---------------------------------------------------------------------------
+  # STEP 2: Create a tiny synthetic training dataset for the emulator
+  # ---------------------------------------------------------------------------
+  # The create_emulator() function expects a data frame with:
+  #   - Parameter columns matching names(para_red)
+  #   - A column named 'Year'
+  #   - A column named 'average_value' (target to emulate)
+  # We simulate 20 samples across 5 years.
+
+  set.seed(123)
+  num_samples <- 20
+  years <- c(5, 10, 15, 20, 25)
+
+  # Sample parameters uniformly within their ranges
+  sample_param <- function(min_val, max_val, n) {
+    stats::runif(n, min = min_val, max = max_val)
+  }
+
+  mort_vals <- sample_param(para_red["min", "mort_base_nt"], para_red["max", "mort_base_nt"], num_samples)
+  alpha_vals <- sample_param(para_red["min", "alpha_red_nt"], para_red["max", "alpha_red_nt"], num_samples)
+
+  # Create a base dataset by repeating parameters for each year and generating
+  # a synthetic response. Here, 'average_value' is a simple function of the
+  # parameters and the year with random noise added for realism.
+  demo_training <- do.call(rbind, lapply(years, function(y) {
+    avg_val <- 50 + 100 * alpha_vals - 200 * mort_vals + 0.3 * y + stats::rnorm(num_samples, sd = 2)
+    data.frame(
+      mort_base_nt = mort_vals,
+      alpha_red_nt = alpha_vals,
+      Year = y,
+      average_value = avg_val
+    )
+  }))
+
+  # ---------------------------------------------------------------------------
+  # STEP 3: Build a demo emulator for a chosen year
+  # ---------------------------------------------------------------------------
+  # We will model the relationship between (mort_base_nt, alpha_red_nt) and the
+  # response 'average_value' at a single year (e.g., year = 15).
+
+  demo_year <- 15
+  # Disable plotting for the demo to avoid plotting placeholder emulator objects
+  old_plot_flag <- CONFIG$create_plots
+  CONFIG$create_plots <- FALSE
+
+  emulator_demo <- create_emulator(
+    training_data = demo_training,
+    para_red = para_red,
+    year_value = demo_year,
+    wave_id = 1
+  )
+
+  # Restore original plotting preference
+  CONFIG$create_plots <- old_plot_flag
+
+  # ---------------------------------------------------------------------------
+  # STEP 4: Predict on new candidate samples and compute implausibility
+  # ---------------------------------------------------------------------------
+  # Build a small set of candidate parameter points (as a matrix) to query the
+  # emulator and then compute implausibility against synthetic observations.
+
+  candidates <- cbind(
+    mort_base_nt = sample_param(para_red["min", "mort_base_nt"], para_red["max", "mort_base_nt"], 8),
+    alpha_red_nt = sample_param(para_red["min", "alpha_red_nt"], para_red["max", "alpha_red_nt"], 8)
+  )
+
+  # Create a minimal emulators list for calculate_implausibility: a single year
+  emulators_list <- list(emulator_demo)
+
+  # Synthetic observational data for the same single year (as a column matrix)
+  obs_matrix <- matrix(65, nrow = 1, ncol = 1)
+
+  # Synthetic uncertainty for that year (same shape as obs; arbitrary here)
+  unc_matrix <- matrix(4, nrow = 1, ncol = 1)
+
+  implausibility_out <- calculate_implausibility(
+    emulators = emulators_list,
+    samples = candidates,
+    observational_data = obs_matrix,
+    uncertainty = unc_matrix
+  )
+
+  # ---------------------------------------------------------------------------
+  # STEP 5: Inspect demo results
+  # ---------------------------------------------------------------------------
+  # - emulator_demo: placeholder emulator object returned by create_emulator
+  # - implausibility_out$scores: per-sample scores (lower is "more plausible")
+  # - implausibility_out$mean_matrix / var_matrix: predictive summaries
+
+  log_message(sprintf("Demo emulator kernels: %s", paste(emulator_demo$kernels, collapse = ", ")))
+  log_message(sprintf("Demo: computed %d implausibility scores", length(implausibility_out$scores)))
+  log_message(sprintf("Scores (first 5): %s", paste(round(implausibility_out$scores[1:min(5, length(implausibility_out$scores))], 3), collapse = ", ")))
+
+  log_message("=== DEMO USAGE COMPLETE ===", "DEMO")
+}
+
+# -----------------------------------------------------------------------------
 # END OF SCRIPT
 # -----------------------------------------------------------------------------
 

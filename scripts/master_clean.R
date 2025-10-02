@@ -1,4 +1,152 @@
 # =============================================================================
+# DEMO USAGE (Self-contained, runnable example)
+# =============================================================================
+# This demo runs independently of external configs and utilities. It creates a
+# minimal CONFIG, synthetic design matrix and outputs, then builds a placeholder
+# emulator and makes predictions. Set MASTER_DEMO_RUN <- TRUE to run this block
+# and exit before the full workflow.
+
+MASTER_DEMO_RUN <- TRUE
+
+if (isTRUE(MASTER_DEMO_RUN)) {
+  # --------------------------- DEMO CONFIG -----------------------------------
+  CONFIG <- list(
+    base_folder = tempdir(),
+    variables = c("var1", "var2", "var3"),
+    transform_functions = NULL,
+    n_samples = 50,
+    create_plots = FALSE,
+    use_time_varying = FALSE,
+    pca_components = 2,
+    emulator_names = c("matern2.5"),
+    use_vecchia = FALSE,
+    n_test_samples = 12,
+    n_cores = NULL,
+    chunk_size = NULL,
+    perform_sequential_design = FALSE,
+    random_seed = 123,
+    validation_seed = 456,
+    rcp = "85",
+    ensemble = "15",
+    id = "demo"
+  )
+
+  # --------------------- Minimal utilities and helpers -----------------------
+  log_message <- function(message, level = "INFO") {
+    timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+    cat(sprintf("[%s] %s: %s\n", timestamp, level, message))
+  }
+
+  validate_config <- function() { invisible(TRUE) }
+  print_config_summary <- function() {
+    log_message(sprintf("Variables: %s", paste(CONFIG$variables, collapse = ", ")))
+    log_message(sprintf("Samples: %d", CONFIG$n_samples))
+  }
+  set_seed <- function(seed) set.seed(seed)
+  init_exp <- function(id, cs, rcp, case) list(id = id, rcp = rcp, case = case)
+  inspect_data <- function(...) invisible(NULL)
+  check_design <- function(...) invisible(NULL)
+  get_results_path <- function(path) file.path(CONFIG$base_folder, path)
+
+  init_design <- function(N, var, transform = NULL) {
+    # Return a numeric matrix N x length(var)
+    mat <- matrix(runif(N * length(var)), nrow = N)
+    colnames(mat) <- var
+    mat
+  }
+
+  # ------------------------ Placeholder model API ---------------------------
+  # Simple PCA-based emulator using prcomp and linear projection
+  create_emulator <- function(x, y, pca_components = 2, kernel_names = c("matern2.5"), use_vecchia = FALSE) {
+    # x: matrix [n x d], y: matrix [n x t]
+    stopifnot(is.matrix(x), is.matrix(y), nrow(x) == nrow(y))
+    # Fit PCA on outputs
+    pca_fit <- prcomp(y, center = TRUE, scale. = FALSE)
+    k <- min(pca_components, ncol(pca_fit$x))
+    y_basis <- pca_fit$x[, 1:k, drop = FALSE]
+    # Fit a simple linear mapping from x -> y_basis (least squares)
+    X_aug <- cbind(1, x)
+    coef_mat <- solve(t(X_aug) %*% X_aug, t(X_aug) %*% y_basis)
+    emulator <- list(coef = coef_mat, center = pca_fit$center, rotation = pca_fit$rotation[, 1:k, drop = FALSE])
+    # Return closures for transforms
+    pca <- list(
+      transform = function(Y) {
+        scale(Y, center = pca_fit$center, scale = FALSE) %*% pca_fit$rotation[, 1:k, drop = FALSE]
+      },
+      inverse_transform = function(Yb) {
+        Yb %*% t(pca_fit$rotation[, 1:k, drop = FALSE]) + matrix(pca_fit$center, nrow = nrow(Yb), ncol = length(pca_fit$center), byrow = TRUE)
+      }
+    )
+    list(emulator = emulator, pca = pca)
+  }
+
+  # Predict function consistent with main script usage
+  predict <- function(emulator, new_x, cores = NULL, chunks = NULL) {
+    X_aug <- cbind(1, as.matrix(new_x))
+    yb_hat <- X_aug %*% emulator$coef
+    # Map back to original space using stored PCA parts
+    y_hat <- yb_hat %*% t(emulator$rotation) + matrix(emulator$center, nrow = nrow(yb_hat), ncol = length(emulator$center), byrow = TRUE)
+    list(results = list(mean = rowMeans(y_hat), var = apply(y_hat, 1, stats::var)))
+  }
+
+  # Placeholders for DGP/GP and validation/write used in time-varying branch
+  dgp <- function(...) list(model = "dgp")
+  gp <- function(...) list(model = "gp")
+  validate <- function(m) m
+  write <- function(obj, path) { dir.create(path, recursive = TRUE, showWarnings = FALSE); saveRDS(obj, file.path(path, "model.rds")) }
+  nrmse_oos <- function(emulator, inv_fn, test_x, test_y) {
+    preds <- predict(emulator, test_x)$results$mean
+    # Reduce test_y to a comparable 1D by mean across columns
+    y_true <- rowMeans(test_y)
+    rmse <- sqrt(mean((preds - y_true)^2))
+    (rmse) / (max(y_true) - min(y_true) + 1e-8)
+  }
+
+  # ------------------------------ DEMO RUN -----------------------------------
+  log_message("=== MASTER DEMO: START ===", "DEMO")
+
+  # Config summary
+  validate_config(); print_config_summary()
+
+  # Synthetic design
+  set_seed(CONFIG$random_seed)
+  x <- init_design(N = CONFIG$n_samples, var = CONFIG$variables)
+  log_message(paste("Design:", nrow(x), "x", ncol(x)))
+
+  # Synthetic outputs (e.g., 120 months)
+  n_months <- 120
+  y <- matrix(50 + 100 * x[, 1] - 40 * x[, 2] + 0.1 * rnorm(nrow(x) * n_months), nrow = nrow(x), ncol = n_months)
+  log_message(paste("Outputs:", nrow(y), "simulations x", ncol(y), "time points"))
+
+  # Build emulator
+  emu_res <- create_emulator(x, y, pca_components = CONFIG$pca_components, kernel_names = CONFIG$emulator_names, use_vecchia = CONFIG$use_vecchia)
+  emulator <- emu_res$emulator; pca <- emu_res$pca
+  log_message("Emulator created")
+
+  # Test dataset
+  set_seed(CONFIG$random_seed + 1)
+  test_x <- init_design(N = CONFIG$n_test_samples, var = CONFIG$variables)
+  test_y <- matrix(50 + 100 * test_x[, 1] - 40 * test_x[, 2] + 0.1 * rnorm(nrow(test_x) * n_months), nrow = nrow(test_x), ncol = n_months)
+
+  # Evaluate
+  score <- nrmse_oos(emulator, pca$inverse_transform, test_x, test_y)
+  log_message(paste("Test NRMSE:", round(score, 4)))
+
+  # Predictions on full test set
+  preds <- predict(emulator, test_x)
+  log_message(paste("Predictions computed:", length(preds$results$mean)))
+
+  # Save summary
+  output_dir <- get_results_path(paste0("exp", CONFIG$id))
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  saveRDS(list(config = CONFIG, nrmse = score), file.path(output_dir, "demo_summary.rds"))
+  log_message(paste("Demo results saved in:", output_dir))
+
+  log_message("=== MASTER DEMO: COMPLETE ===", "DEMO")
+  quit(save = "no")
+}
+
+# =============================================================================
 # JULES Master Script - Clean Version
 # Description: Main workflow for JULES model emulation and analysis
 #
